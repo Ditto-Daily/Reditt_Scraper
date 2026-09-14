@@ -11,11 +11,23 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+Create `.streamlit/secrets.toml` before starting the app:
+
+```toml
+APP_PASSWORD = "choose-a-strong-team-password"
+```
+
 ## Deploy on Streamlit Community Cloud
 
 1. Open [share.streamlit.io](https://share.streamlit.io/) and sign in with GitHub.
 2. Create an app from this repository and select `app.py` as the entry point.
-3. Keep the app private and invite team members from the app's sharing settings.
+3. Open the app's **Settings → Secrets** and add:
+
+   ```toml
+   APP_PASSWORD = "choose-a-strong-team-password"
+   ```
+
+4. Save the secrets and reboot the app.
 
 The Reddit extraction uses Arctic Shift and does not require Reddit credentials.
 Users currently enter a Gemini API key in the private sidebar when they want to

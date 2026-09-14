@@ -10,6 +10,7 @@ Run the application:
 
 from __future__ import annotations
 
+import hmac
 import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from requests.adapters import HTTPAdapter
+from streamlit.errors import StreamlitSecretNotFoundError
 from urllib3.util.retry import Retry
 
 
@@ -500,6 +502,42 @@ def run_ai_chat_turn(
     )
     return response.text or "The model returned an empty response."
 
+
+def require_password() -> None:
+    """Stop the app until the visitor enters the configured password."""
+    try:
+        expected_password = str(st.secrets["APP_PASSWORD"])
+    except (KeyError, StreamlitSecretNotFoundError):
+        st.error(
+            "App access is not configured. Add `APP_PASSWORD` to the "
+            "app's Streamlit secrets."
+        )
+        st.stop()
+
+    if st.session_state.get("authenticated", False):
+        return
+
+    st.title("🔒 Reddit Market Intelligence")
+    st.caption("Enter the team password to access this dashboard.")
+    with st.form("login_form", clear_on_submit=True):
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+
+    if submitted:
+        if hmac.compare_digest(password, expected_password):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
+
+
+require_password()
+
+if st.sidebar.button("Log out"):
+    st.session_state.authenticated = False
+    st.rerun()
 
 if "reddit_data" not in st.session_state:
     st.session_state.reddit_data = pd.DataFrame()
