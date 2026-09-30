@@ -41,6 +41,8 @@ REQUEST_TIMEOUT_SECONDS = 20
 MAX_AI_PAYLOAD_CHARS = 30_000
 MAX_ADDITIONAL_CONTEXT_CHARS = 10_000
 MAX_CHAT_HISTORY_MESSAGES = 12
+POST_SEARCH_PAGE_SIZE = 100
+MAX_POST_SEARCH_PAGES = 50
 
 # A compact built-in list avoids external corpora and NLTK downloads.
 STOPWORDS = {
@@ -307,12 +309,12 @@ def fetch_reddit_posts(
     minimum_score: int,
     comment_mode: str,
     comment_limit: int,
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None, int]:
     """Fetch current archived posts and comments without Reddit OAuth."""
     session = create_data_session()
     params: dict[str, Any] = {
         "subreddit": subreddit_name,
-        "limit": 100,
+        "limit": POST_SEARCH_PAGE_SIZE,
         "sort": "desc",
     }
     if sorting == "Top":
@@ -320,16 +322,57 @@ def fetch_reddit_posts(
         if cutoff:
             params["after"] = cutoff
 
-    response = get_arctic_shift_json(
-        session,
-        "posts/search",
-        params,
-    )
-    posts = [
-        post
-        for post in response.get("data", [])
-        if isinstance(post, dict)
-    ]
+    posts: list[dict[str, Any]] = []
+    seen_post_ids: set[str] = set()
+    eligible_post_count = 0
+    before_timestamp: int | None = None
+
+    for _ in range(MAX_POST_SEARCH_PAGES):
+        page_params = dict(params)
+        if before_timestamp is not None:
+            page_params["before"] = before_timestamp
+
+        response = get_arctic_shift_json(
+            session,
+            "posts/search",
+            page_params,
+        )
+        page_posts = [
+            post
+            for post in response.get("data", [])
+            if isinstance(post, dict)
+        ]
+        if not page_posts:
+            break
+
+        new_posts: list[dict[str, Any]] = []
+        for post in page_posts:
+            post_id = str(post.get("id") or "")
+            if not post_id or post_id in seen_post_ids:
+                continue
+            seen_post_ids.add(post_id)
+            new_posts.append(post)
+
+        if not new_posts:
+            break
+
+        posts.extend(new_posts)
+        eligible_post_count += sum(
+            int(post.get("num_comments") or 0) >= minimum_comments
+            and int(post.get("score") or 0) >= minimum_score
+            for post in new_posts
+        )
+        if eligible_post_count >= thread_count:
+            break
+
+        oldest_timestamp = min(
+            int(post.get("created_utc") or 0)
+            for post in new_posts
+        )
+        if oldest_timestamp <= 0:
+            break
+        before_timestamp = oldest_timestamp
+
     eligible_posts = [
         post
         for post in posts
@@ -379,7 +422,7 @@ def fetch_reddit_posts(
                 ),
             }
         )
-    return rows, comment_warning
+    return rows, comment_warning, len(posts)
 
 
 def get_top_ngrams(data: pd.DataFrame, limit: int = 15) -> pd.DataFrame:
@@ -637,8 +680,9 @@ with filter_col_4:
     )
 
 st.caption(
-    "Engagement filters and rankings are applied to up to 100 of the freshest "
-    "archived candidate posts."
+    "The archive search keeps paging into older posts until it finds the requested "
+    f"number of matching threads, up to {POST_SEARCH_PAGE_SIZE * MAX_POST_SEARCH_PAGES:,} "
+    "candidate posts."
 )
 
 if st.button("🚀 Extract Reddit Intelligence", type="primary"):
@@ -650,7 +694,7 @@ if st.button("🚀 Extract Reddit Intelligence", type="primary"):
     else:
         try:
             with st.spinner(f"Extracting r/{subreddit_name} conversations..."):
-                records, comment_warning = fetch_reddit_posts(
+                records, comment_warning, searched_post_count = fetch_reddit_posts(
                     subreddit_name,
                     thread_count,
                     sorting,
@@ -664,7 +708,15 @@ if st.button("🚀 Extract Reddit Intelligence", type="primary"):
                 st.session_state.reddit_data = pd.DataFrame(records)
                 st.session_state.ai_analysis = ""
                 st.session_state.ai_chat_history = []
-                st.success(f"Extracted {len(records)} threads from r/{subreddit_name}.")
+                st.success(
+                    f"Extracted {len(records)} threads from r/{subreddit_name} after "
+                    f"searching {searched_post_count:,} archived posts."
+                )
+                if len(records) < thread_count:
+                    st.warning(
+                        f"Only {len(records)} of {thread_count} requested threads matched "
+                        f"within the {searched_post_count:,} archived posts searched."
+                    )
                 if comment_warning:
                     st.warning(
                         "Posts were extracted, but some archived comments could not be loaded. "
@@ -672,8 +724,8 @@ if st.button("🚀 Extract Reddit Intelligence", type="primary"):
                     )
             else:
                 st.warning(
-                    "No threads matched these filters in the 100 freshest archived posts. "
-                    "Try lowering the minimum score or comment count."
+                    f"No threads matched these filters in the {searched_post_count:,} "
+                    "archived posts searched. Try lowering the minimum score or comment count."
                 )
         except RedditDataError as exc:
             st.error(str(exc))
