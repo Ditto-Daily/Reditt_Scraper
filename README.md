@@ -4,6 +4,12 @@ A private Streamlit dashboard for collecting archived Reddit conversations,
 analyzing engagement and keywords, and conducting contextual research with
 Google Gemini.
 
+## Search modes
+
+- **Community Search** retrieves archived posts from one specific subreddit.
+- **Keyword Search** searches archived posts across communities using one keyword
+  or up to five comma-separated keywords with AND/OR matching.
+
 ## Run locally
 
 ```bash
@@ -29,7 +35,8 @@ APP_PASSWORD = "choose-a-strong-team-password"
 
 4. Save the secrets and reboot the app.
 
-The Reddit extraction uses Arctic Shift and does not require Reddit credentials.
+Reddit extraction uses the Arctic Shift and PullPush public archives and does
+not require Reddit credentials.
 Users currently enter a Gemini API key in the private sidebar when they want to
 use AI analysis or chat.
 

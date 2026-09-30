@@ -37,12 +37,15 @@ st.set_page_config(
 
 REDDIT_BASE_URL = "https://www.reddit.com"
 ARCTIC_SHIFT_BASE_URL = "https://arctic-shift.photon-reddit.com/api"
+PULLPUSH_BASE_URL = "https://api.pullpush.io/reddit/search"
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_AI_PAYLOAD_CHARS = 30_000
 MAX_ADDITIONAL_CONTEXT_CHARS = 10_000
 MAX_CHAT_HISTORY_MESSAGES = 12
 POST_SEARCH_PAGE_SIZE = 100
 MAX_POST_SEARCH_PAGES = 50
+MAX_KEYWORDS = 5
+MAX_KEYWORD_SEARCH_PAGES = 10
 
 # A compact built-in list avoids external corpora and NLTK downloads.
 STOPWORDS = {
@@ -164,6 +167,38 @@ def get_arctic_shift_json(
         raise RedditDataError("The Reddit archive returned an invalid response.") from exc
     if not isinstance(result, dict):
         raise RedditDataError("The Reddit archive returned an unexpected data format.")
+    return result
+
+
+def get_pullpush_json(
+    session: requests.Session,
+    endpoint: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Request and decode a PullPush endpoint with user-safe errors."""
+    url = f"{PULLPUSH_BASE_URL}/{endpoint.strip('/')}/"
+    try:
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.Timeout as exc:
+        raise RedditDataError("The keyword archive search timed out. Please try again.") from exc
+    except requests.RequestException as exc:
+        raise RedditDataError(f"Could not connect to the keyword archive: {exc}") from exc
+
+    if response.status_code == 429:
+        raise RedditDataError("The keyword archive rate limit was reached. Wait and retry.")
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RedditDataError(
+            f"The keyword archive returned HTTP {response.status_code}. Try again later."
+        ) from exc
+
+    try:
+        result = response.json()
+    except requests.exceptions.JSONDecodeError as exc:
+        raise RedditDataError("The keyword archive returned an invalid response.") from exc
+    if not isinstance(result, dict):
+        raise RedditDataError("The keyword archive returned an unexpected data format.")
     return result
 
 
@@ -404,6 +439,7 @@ def fetch_reddit_posts(
             {
                 "Title": post.get("title", ""),
                 "Body": post.get("selftext", "") or "",
+                "Subreddit": post.get("subreddit", subreddit_name),
                 "Score": int(post.get("score", 0)),
                 "Comments Count": int(post.get("num_comments", 0)),
                 "Upvote Ratio": float(post.get("upvote_ratio", 0.0)),
@@ -423,6 +459,164 @@ def fetch_reddit_posts(
             }
         )
     return rows, comment_warning, len(posts)
+
+
+def parse_keywords(value: str) -> list[str]:
+    """Return unique comma- or newline-separated search terms."""
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[,\n]+", value):
+        keyword = item.strip()
+        normalized = keyword.casefold()
+        if keyword and normalized not in seen:
+            seen.add(normalized)
+            keywords.append(keyword)
+    return keywords
+
+
+def post_matches_keywords(
+    post: dict[str, Any],
+    keywords: list[str],
+    match_mode: str,
+) -> bool:
+    """Match keywords against a post's title and body."""
+    text = f"{post.get('title', '')} {post.get('selftext', '')}".casefold()
+    matches = [keyword.casefold() in text for keyword in keywords]
+    return all(matches) if match_mode == "All keywords (AND)" else any(matches)
+
+
+def get_time_cutoff_epoch(time_filter: str) -> int | None:
+    """Convert a keyword-search time range to a UTC epoch timestamp."""
+    periods = {
+        "day": timedelta(days=1),
+        "week": timedelta(days=7),
+        "month": timedelta(days=30),
+        "year": timedelta(days=365),
+    }
+    period = periods.get(time_filter)
+    if period is None:
+        return None
+    return int((datetime.now(UTC) - period).timestamp())
+
+
+def fetch_keyword_posts(
+    keywords: list[str],
+    match_mode: str,
+    thread_count: int,
+    sorting: str,
+    time_filter: str,
+    minimum_comments: int,
+    minimum_score: int,
+    comment_mode: str,
+    comment_limit: int,
+) -> tuple[list[dict[str, Any]], str | None, int]:
+    """Search archived Reddit posts by one or more keywords across communities."""
+    session = create_data_session()
+    cutoff = get_time_cutoff_epoch(time_filter)
+    search_queries = (
+        [" ".join(keywords)]
+        if match_mode == "All keywords (AND)" and len(keywords) > 1
+        else keywords
+    )
+    before_by_query: dict[str, int | None] = {
+        query: None for query in search_queries
+    }
+    active_queries = set(search_queries)
+    posts_by_id: dict[str, dict[str, Any]] = {}
+
+    for _ in range(MAX_KEYWORD_SEARCH_PAGES):
+        for query in list(active_queries):
+            params: dict[str, Any] = {
+                "q": query,
+                "size": POST_SEARCH_PAGE_SIZE,
+                "sort": "desc",
+                "sort_type": "created_utc",
+            }
+            if cutoff is not None:
+                params["after"] = cutoff
+            if before_by_query[query] is not None:
+                params["before"] = before_by_query[query]
+
+            response = get_pullpush_json(session, "submission", params)
+            page_posts = [
+                post
+                for post in response.get("data", [])
+                if isinstance(post, dict)
+            ]
+            if not page_posts:
+                active_queries.remove(query)
+                continue
+
+            valid_timestamps = [
+                int(post.get("created_utc") or 0)
+                for post in page_posts
+                if int(post.get("created_utc") or 0) > 0
+            ]
+            if valid_timestamps:
+                before_by_query[query] = min(valid_timestamps)
+            else:
+                active_queries.remove(query)
+
+            for post in page_posts:
+                post_id = str(post.get("id") or "")
+                if post_id:
+                    posts_by_id[post_id] = post
+
+        eligible_posts = [
+            post
+            for post in posts_by_id.values()
+            if post_matches_keywords(post, keywords, match_mode)
+            and int(post.get("num_comments") or 0) >= minimum_comments
+            and int(post.get("score") or 0) >= minimum_score
+        ]
+        if len(eligible_posts) >= thread_count or not active_queries:
+            break
+
+    selected_posts = rank_posts(eligible_posts, sorting)[:thread_count]
+    rows: list[dict[str, Any]] = []
+    comment_warning: str | None = None
+    fetch_comments = True
+    for post in selected_posts:
+        permalink = str(post.get("permalink") or "")
+        top_comments: list[str] = []
+        post_id = str(post.get("id") or "")
+        if fetch_comments and post_id:
+            try:
+                top_comments = get_comments(
+                    session,
+                    post_id,
+                    comment_mode,
+                    comment_limit,
+                )
+            except RedditDataError as exc:
+                comment_warning = str(exc)
+                fetch_comments = False
+
+        rows.append(
+            {
+                "Title": post.get("title", ""),
+                "Body": post.get("selftext", "") or "",
+                "Subreddit": post.get("subreddit", ""),
+                "Score": int(post.get("score") or 0),
+                "Comments Count": int(post.get("num_comments") or 0),
+                "Upvote Ratio": float(post.get("upvote_ratio") or 0.0),
+                "URL": (
+                    f"{REDDIT_BASE_URL}{permalink}"
+                    if permalink
+                    else f"{REDDIT_BASE_URL}/comments/{post_id}/"
+                ),
+                "Extracted Comments": "\n\n".join(top_comments),
+                "Extracted Comments Count": len(top_comments),
+                "Author": post.get("author") or "[deleted]",
+                "Created UTC": pd.to_datetime(
+                    post.get("created_utc", 0),
+                    unit="s",
+                    utc=True,
+                ),
+            }
+        )
+
+    return rows, comment_warning, len(posts_by_id)
 
 
 def get_top_ngrams(data: pd.DataFrame, limit: int = 15) -> pd.DataFrame:
@@ -452,6 +646,7 @@ def build_ai_payload(data: pd.DataFrame, max_chars: int = MAX_AI_PAYLOAD_CHARS) 
     for index, row in data.iterrows():
         section = (
             f"POST {index + 1}\n"
+            f"SUBREDDIT: r/{row.get('Subreddit', '')}\n"
             f"TITLE: {row.get('Title', '')}\n"
             f"SCORE: {row.get('Score', 0)} | COMMENTS: {row.get('Comments Count', 0)} "
             f"| UPVOTE RATIO: {row.get('Upvote Ratio', 0):.2f}\n"
@@ -591,7 +786,10 @@ if "ai_chat_history" not in st.session_state:
 
 
 st.sidebar.header("🌐 Reddit Data Source")
-st.sidebar.info("Powered by Arctic Shift’s public Reddit archive. No Reddit API key required.")
+st.sidebar.info(
+    "Powered by Arctic Shift and PullPush public Reddit archives. "
+    "No Reddit API key required."
+)
 st.sidebar.caption(
     "Archive availability and freshness depend on the community-maintained data provider."
 )
@@ -615,7 +813,8 @@ st.caption(
     "into evidence-based marketing insights."
 )
 
-st.subheader("Reddit Data Extraction")
+st.subheader("Community Search")
+st.caption("Search archived posts from one specific subreddit.")
 control_col_1, control_col_2, control_col_3, control_col_4 = st.columns(
     [2.2, 1.4, 1.4, 1.4]
 )
@@ -733,13 +932,168 @@ if st.button("🚀 Extract Reddit Intelligence", type="primary"):
             st.error(f"Could not extract Reddit data: {exc}")
 
 
+st.divider()
+st.subheader("Keyword Search")
+st.caption(
+    "Search archived posts across Reddit communities. Enter one keyword or up to "
+    f"{MAX_KEYWORDS} comma-separated keywords, such as `PMDD, mom`."
+)
+
+keyword_col_1, keyword_col_2, keyword_col_3 = st.columns([2.4, 1.4, 1.2])
+with keyword_col_1:
+    keyword_input = st.text_input(
+        "Keywords",
+        placeholder="PMDD, mom",
+        key="keyword_search_terms",
+    )
+with keyword_col_2:
+    parsed_keyword_preview = parse_keywords(keyword_input)
+    keyword_match_mode = st.selectbox(
+        "Match behavior",
+        ["All keywords (AND)", "Any keyword (OR)"],
+        key="keyword_match_mode",
+        disabled=len(parsed_keyword_preview) < 2,
+        help=(
+            "AND requires every keyword in the title or post body. "
+            "OR accepts a post containing any keyword."
+        ),
+    )
+with keyword_col_3:
+    keyword_thread_count = st.slider(
+        "Thread count",
+        5,
+        100,
+        20,
+        key="keyword_thread_count",
+    )
+
+keyword_filter_1, keyword_filter_2, keyword_filter_3, keyword_filter_4 = st.columns(4)
+with keyword_filter_1:
+    keyword_sorting = st.selectbox(
+        "Sort keyword results by",
+        ["Hot", "New", "Top", "Rising", "Most Discussed"],
+        key="keyword_sorting",
+        help="Ranking is applied locally to the matching archived posts.",
+    )
+with keyword_filter_2:
+    keyword_time_filter = st.selectbox(
+        "Keyword time range",
+        ["all", "year", "month", "week", "day"],
+        key="keyword_time_filter",
+    )
+with keyword_filter_3:
+    keyword_minimum_comments = st.number_input(
+        "Keyword minimum comments",
+        min_value=0,
+        max_value=500,
+        value=0,
+        step=1,
+        key="keyword_minimum_comments",
+    )
+with keyword_filter_4:
+    keyword_minimum_score = st.number_input(
+        "Keyword minimum score/upvotes",
+        min_value=0,
+        max_value=500,
+        value=0,
+        step=1,
+        key="keyword_minimum_score",
+    )
+
+keyword_comment_col_1, keyword_comment_col_2 = st.columns(2)
+with keyword_comment_col_1:
+    keyword_comment_mode = st.selectbox(
+        "Keyword result comment extraction",
+        ["Top 5 comments", "Full thread"],
+        key="keyword_comment_mode",
+        help="Full thread includes nested replies and can take longer.",
+    )
+with keyword_comment_col_2:
+    keyword_comment_limit = st.slider(
+        "Keyword maximum comments per thread",
+        min_value=25,
+        max_value=500,
+        value=100,
+        step=25,
+        disabled=keyword_comment_mode != "Full thread",
+        key="keyword_comment_limit",
+    )
+
+st.caption(
+    "Keyword results are collected from a separate public archive and then filtered "
+    "and ranked locally. Search terms are sent to that archive provider."
+)
+
+if st.button("🔎 Search Reddit by Keyword", type="primary"):
+    keywords = parse_keywords(keyword_input)
+    if not keywords:
+        st.error("Enter at least one keyword.")
+    elif len(keywords) > MAX_KEYWORDS:
+        st.error(f"Enter no more than {MAX_KEYWORDS} keywords.")
+    elif any(len(keyword) > 100 for keyword in keywords):
+        st.error("Each keyword must be 100 characters or fewer.")
+    else:
+        try:
+            match_mode = (
+                keyword_match_mode
+                if len(keywords) > 1
+                else "Any keyword (OR)"
+            )
+            with st.spinner(
+                f"Searching archived Reddit posts for {', '.join(keywords)}..."
+            ):
+                records, comment_warning, searched_post_count = fetch_keyword_posts(
+                    keywords,
+                    match_mode,
+                    keyword_thread_count,
+                    keyword_sorting,
+                    keyword_time_filter,
+                    keyword_minimum_comments,
+                    keyword_minimum_score,
+                    (
+                        "Full thread"
+                        if keyword_comment_mode == "Full thread"
+                        else "Top 5"
+                    ),
+                    keyword_comment_limit,
+                )
+            if records:
+                st.session_state.reddit_data = pd.DataFrame(records)
+                st.session_state.ai_analysis = ""
+                st.session_state.ai_chat_history = []
+                st.success(
+                    f"Extracted {len(records)} keyword-matched threads after searching "
+                    f"{searched_post_count:,} unique archived posts."
+                )
+                if len(records) < keyword_thread_count:
+                    st.warning(
+                        f"Only {len(records)} of {keyword_thread_count} requested threads "
+                        "matched within the keyword search limit."
+                    )
+                if comment_warning:
+                    st.warning(
+                        "Posts were extracted, but some archived comments could not be loaded. "
+                        f"Some top comments may be missing. {comment_warning}"
+                    )
+            else:
+                st.warning(
+                    f"No posts matched within the {searched_post_count:,} unique archived "
+                    "posts searched. Try fewer keywords, OR matching, a wider time range, "
+                    "or lower engagement filters."
+                )
+        except RedditDataError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Could not complete the keyword search: {exc}")
+
+
 data = st.session_state.reddit_data
 if not data.empty:
     st.divider()
     st.subheader("Extracted Data")
     st.caption(
-        "Engagement metrics reflect the latest values stored by Arctic Shift and may "
-        "lag the values currently shown on Reddit."
+        "Engagement metrics reflect archived values and may lag the values currently "
+        "shown on Reddit."
     )
     total_threads = len(data)
     total_upvotes = int(data["Score"].sum())
@@ -752,7 +1106,18 @@ if not data.empty:
     metric_3.metric("Total Comments", f"{total_comments:,}")
     metric_4.metric("Average Engagement", f"{average_engagement:,.1f}")
 
-    display_columns = ["Title", "Score", "Comments Count", "Upvote Ratio", "URL"]
+    display_columns = [
+        column
+        for column in [
+            "Subreddit",
+            "Title",
+            "Score",
+            "Comments Count",
+            "Upvote Ratio",
+            "URL",
+        ]
+        if column in data.columns
+    ]
     st.dataframe(
         data[display_columns],
         use_container_width=True,
