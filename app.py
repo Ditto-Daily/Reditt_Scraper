@@ -602,21 +602,21 @@ with control_col_4:
 
 filter_col_1, filter_col_2, filter_col_3, filter_col_4 = st.columns(4)
 with filter_col_1:
-    minimum_comments = st.slider(
+    minimum_comments = st.number_input(
         "Minimum comments",
         min_value=0,
-        max_value=5_000,
+        max_value=500,
         value=0,
-        step=10,
+        step=1,
         help="Exclude threads with fewer archived comments.",
     )
 with filter_col_2:
-    minimum_score = st.slider(
+    minimum_score = st.number_input(
         "Minimum score/upvotes",
         min_value=0,
-        max_value=50_000,
+        max_value=500,
         value=0,
-        step=50,
+        step=1,
         help="Exclude threads with a lower archived Reddit score.",
     )
 with filter_col_3:
