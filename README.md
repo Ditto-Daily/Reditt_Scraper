@@ -31,14 +31,17 @@ APP_PASSWORD = "choose-a-strong-team-password"
 
    ```toml
    APP_PASSWORD = "choose-a-strong-team-password"
+   GEMINI_API_KEY = "your-gemini-key"
+   # Optional: model priority order (falls back on rate limit/overload)
+   # GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
    ```
 
 4. Save the secrets and reboot the app.
 
 Reddit extraction uses the Arctic Shift and PullPush public archives and does
 not require Reddit credentials.
-Users currently enter a Gemini API key in the private sidebar when they want to
-use AI analysis or chat.
+The Gemini key is read from Streamlit secrets (`GEMINI_API_KEY`). AI requests try
+each model in order and fall back to the next when one hits its quota.
 
 ## Security
 

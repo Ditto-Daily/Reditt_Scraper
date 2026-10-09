@@ -22,6 +22,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from requests.adapters import HTTPAdapter
 from streamlit.errors import StreamlitSecretNotFoundError
@@ -663,16 +664,61 @@ def build_ai_payload(data: pd.DataFrame, max_chars: int = MAX_AI_PAYLOAD_CHARS) 
     return "".join(sections)
 
 
+GEMINI_FALLBACK_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+]
+# Quota (429), overload (500/503) and unavailable-model (404) errors move on to the next model.
+FALLBACK_ERROR_CODES = {404, 429, 500, 503}
+
+
+def get_gemini_api_key() -> str:
+    """Read the Gemini key from Streamlit secrets, never from the UI."""
+    try:
+        return str(st.secrets["GEMINI_API_KEY"]).strip()
+    except (KeyError, FileNotFoundError):
+        return ""
+
+
+def get_gemini_models() -> list[str]:
+    """Model priority list; override with GEMINI_MODELS (a list) in secrets."""
+    try:
+        configured = [str(m).strip() for m in st.secrets["GEMINI_MODELS"]]
+    except (KeyError, FileNotFoundError, TypeError):
+        configured = []
+    return [m for m in configured if m] or GEMINI_FALLBACK_MODELS
+
+
+def generate_with_fallback(api_key: str, contents, config) -> str:
+    """Try each model in order, moving on when one is rate limited or unavailable."""
+    client = genai.Client(api_key=api_key)
+    models = get_gemini_models()
+    last_error: Exception | None = None
+    for model in models:
+        try:
+            response = client.models.generate_content(
+                model=model, contents=contents, config=config
+            )
+            return response.text or "The model returned an empty response."
+        except genai_errors.APIError as exc:
+            if exc.code not in FALLBACK_ERROR_CODES:
+                raise
+            last_error = exc
+    raise RuntimeError(
+        f"All models failed or are rate limited ({', '.join(models)}). "
+        f"Last error: {last_error}"
+    )
+
+
 def run_ai_analysis(
     api_key: str,
-    model: str,
     analysis_prompt: str,
     payload: str,
 ) -> str:
     """Send Reddit context to Gemini and return the rendered analysis."""
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
+    return generate_with_fallback(
+        api_key,
         contents=(
             f"{analysis_prompt.strip()}\n\n"
             "Base every claim on the supplied Reddit sample. State limitations "
@@ -688,12 +734,10 @@ def run_ai_analysis(
             temperature=0.2,
         ),
     )
-    return response.text or "The model returned an empty response."
 
 
 def run_ai_chat_turn(
     api_key: str,
-    model: str,
     question: str,
     history: list[dict[str, str]],
     reddit_payload: str,
@@ -720,9 +764,8 @@ def run_ai_chat_turn(
     )
 
     extra_context = additional_context.strip()[:MAX_ADDITIONAL_CONTEXT_CHARS]
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
+    return generate_with_fallback(
+        api_key,
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=(
@@ -738,7 +781,6 @@ def run_ai_chat_turn(
             temperature=0.3,
         ),
     )
-    return response.text or "The model returned an empty response."
 
 
 def require_password() -> None:
@@ -795,17 +837,11 @@ st.sidebar.caption(
 )
 st.sidebar.divider()
 st.sidebar.subheader("Optional AI Analysis")
-gemini_api_key = st.sidebar.text_input("Gemini API Key", type="password")
-gemini_model = st.sidebar.selectbox(
-    "Gemini Model",
-    options=[
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-    ],
-    index=0,
-)
-st.sidebar.caption("The Gemini key is needed only when you run the optional AI strategist.")
+gemini_api_key = get_gemini_api_key()
+if gemini_api_key:
+    st.sidebar.caption("Gemini key loaded from app secrets.")
+else:
+    st.sidebar.warning("Add GEMINI_API_KEY to this app's Streamlit secrets to enable AI.")
 
 st.title("📊 Reddit Market Intelligence")
 st.caption(
@@ -1182,8 +1218,8 @@ if not data.empty:
             if selected_template == "✍️ Custom Marketing Query"
             else ANALYSIS_TEMPLATES[selected_template]
         )
-        if not gemini_api_key.strip():
-            st.error("Add your Gemini API key in the sidebar.")
+        if not gemini_api_key:
+            st.error("GEMINI_API_KEY is missing from Streamlit secrets.")
         elif not analysis_prompt.strip():
             st.error("Enter a custom marketing question.")
         else:
@@ -1191,8 +1227,7 @@ if not data.empty:
                 with st.spinner("The AI strategist is analyzing the Reddit sample..."):
                     payload = build_ai_payload(data)
                     st.session_state.ai_analysis = run_ai_analysis(
-                        gemini_api_key.strip(),
-                        gemini_model,
+                        gemini_api_key,
                         analysis_prompt,
                         payload,
                     )
@@ -1235,8 +1270,8 @@ if not data.empty:
         key="reddit_research_chat_input",
     )
     if chat_question:
-        if not gemini_api_key.strip():
-            st.error("Add your Gemini API key in the sidebar to use the research chat.")
+        if not gemini_api_key:
+            st.error("GEMINI_API_KEY is missing from Streamlit secrets.")
         else:
             previous_history = list(st.session_state.ai_chat_history)
             st.session_state.ai_chat_history.append(
@@ -1248,8 +1283,7 @@ if not data.empty:
                 with st.chat_message("assistant"):
                     with st.spinner("Analyzing the Reddit research..."):
                         chat_response = run_ai_chat_turn(
-                            gemini_api_key.strip(),
-                            gemini_model,
+                            gemini_api_key,
                             chat_question,
                             previous_history,
                             build_ai_payload(data),
