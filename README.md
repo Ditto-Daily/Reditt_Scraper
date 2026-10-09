@@ -32,8 +32,8 @@ APP_PASSWORD = "choose-a-strong-team-password"
    ```toml
    APP_PASSWORD = "choose-a-strong-team-password"
    GEMINI_API_KEY = "your-gemini-key"
-   # Optional: model priority order (falls back on rate limit/overload)
-   # GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
+   # Model priority order. Falls back to the next on rate limit/overload/unknown model.
+   GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
    ```
 
 4. Save the secrets and reboot the app.

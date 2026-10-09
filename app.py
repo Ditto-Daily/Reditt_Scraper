@@ -665,8 +665,11 @@ def build_ai_payload(data: pd.DataFrame, max_chars: int = MAX_AI_PAYLOAD_CHARS) 
 
 
 GEMINI_FALLBACK_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
 ]
 # Quota (429), overload (500/503) and unavailable-model (404) errors move on to the next model.
