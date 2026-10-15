@@ -1,3 +1,4 @@
+import { computeSessionToken, getPassword } from "./auth";
 import {
   MAX_KEYWORD_SEARCH_PAGES,
   MAX_POST_SEARCH_PAGES,
@@ -118,13 +119,18 @@ async function getJson(
 
 const arcticShift = (endpoint: string, params: Record<string, string | number>) =>
   getJson(ARCTIC_SHIFT_BASE_URL, endpoint.replace(/^\/+/, ""), params, "Reddit archive");
-// PullPush sits behind Cloudflare, which can challenge datacenter IPs. If PULLPUSH_PROXY_URL is set,
-// requests go through the Cloudflare Worker relay in cloudflare-worker/ instead.
-const pullPush = (endpoint: string, params: Record<string, string | number>) => {
+// PullPush sits behind Cloudflare, which can challenge Node requests from Vercel. Routing, in order:
+// 1. PULLPUSH_PROXY_URL set: Cloudflare Worker relay (cloudflare-worker/).
+// 2. Running on Vercel: the Python function in api/pullpush.py.
+// 3. Otherwise (local dev): call PullPush directly.
+const pullPush = async (endpoint: string, params: Record<string, string | number>) => {
   const proxyUrl = (process.env.PULLPUSH_PROXY_URL ?? "").replace(/\/+$/, "");
-  const proxyKey = process.env.PULLPUSH_PROXY_KEY ?? "";
   if (proxyUrl) {
-    return getJson(proxyUrl, "", params, "keyword archive", { "x-relay-key": proxyKey });
+    return getJson(proxyUrl, "", params, "keyword archive", { "x-relay-key": process.env.PULLPUSH_PROXY_KEY ?? "" });
+  }
+  if (process.env.VERCEL_URL) {
+    const key = await computeSessionToken(getPassword());
+    return getJson(`https://${process.env.VERCEL_URL}`, "api/pullpush", params, "keyword archive", { "x-relay-key": key });
   }
   return getJson("https://api.pullpush.io/reddit/search", `${endpoint.replace(/^\/+|\/+$/g, "")}/`, params, "keyword archive");
 };
