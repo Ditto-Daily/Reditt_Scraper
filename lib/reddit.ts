@@ -16,6 +16,7 @@ const PULLPUSH_BASE_URL = "https://api.pullpush.io/reddit/search";
 const REQUEST_TIMEOUT_MS = 20_000;
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
 const COMMENT_CONCURRENCY = 5;
+const USER_AGENT = "Mozilla/5.0 (compatible; DITTO-Reddit-Intelligence/1.0; +https://dittodaily.com)";
 
 type Json = Record<string, any>;
 
@@ -72,7 +73,7 @@ async function getJson(
     }
     try {
       response = await fetch(url, {
-        headers: { Accept: "application/json" },
+        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         cache: "no-store",
       });
@@ -98,7 +99,10 @@ async function getJson(
     throw new RedditDataError(`The ${label} rate limit was reached. Wait and retry.`);
   }
   if (!response.ok) {
-    throw new RedditDataError(`The ${label} returned HTTP ${response.status}. Try again later.`);
+    const detail = (await response.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
+    throw new RedditDataError(
+      `The ${label} returned HTTP ${response.status}. Try again later.${response.status === 403 ? ` The archive may be blocking this server. ${detail}` : ""}`,
+    );
   }
   let result: unknown;
   try {
