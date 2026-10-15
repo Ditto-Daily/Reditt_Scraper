@@ -4,7 +4,7 @@ A private Streamlit dashboard for collecting archived Reddit conversations,
 analyzing engagement and keywords, and conducting contextual research with
 Google Gemini.
 
-## Search modes
+## Search modes 
 
 - **Community Search** retrieves archived posts from one specific subreddit.
 - **Keyword Search** searches archived posts across communities using one keyword
