@@ -12,7 +12,6 @@ import {
 
 const REDDIT_BASE_URL = "https://www.reddit.com";
 const ARCTIC_SHIFT_BASE_URL = "https://arctic-shift.photon-reddit.com/api";
-const PULLPUSH_BASE_URL = "https://api.pullpush.io/reddit/search";
 const REQUEST_TIMEOUT_MS = 20_000;
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
 const COMMENT_CONCURRENCY = 5;
@@ -59,6 +58,7 @@ async function getJson(
   path: string,
   params: Record<string, string | number>,
   label: "Reddit archive" | "keyword archive",
+  extraHeaders: Record<string, string> = {},
 ): Promise<Json> {
   const url = new URL(`${baseUrl}/${path}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
@@ -73,7 +73,7 @@ async function getJson(
     }
     try {
       response = await fetch(url, {
-        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+        headers: { Accept: "application/json", "User-Agent": USER_AGENT, ...extraHeaders },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         cache: "no-store",
       });
@@ -118,8 +118,16 @@ async function getJson(
 
 const arcticShift = (endpoint: string, params: Record<string, string | number>) =>
   getJson(ARCTIC_SHIFT_BASE_URL, endpoint.replace(/^\/+/, ""), params, "Reddit archive");
-const pullPush = (endpoint: string, params: Record<string, string | number>) =>
-  getJson(PULLPUSH_BASE_URL, `${endpoint.replace(/^\/+|\/+$/g, "")}/`, params, "keyword archive");
+// PullPush sits behind Cloudflare, which can challenge datacenter IPs. If PULLPUSH_PROXY_URL is set,
+// requests go through the Cloudflare Worker relay in cloudflare-worker/ instead.
+const pullPush = (endpoint: string, params: Record<string, string | number>) => {
+  const proxyUrl = (process.env.PULLPUSH_PROXY_URL ?? "").replace(/\/+$/, "");
+  const proxyKey = process.env.PULLPUSH_PROXY_KEY ?? "";
+  if (proxyUrl) {
+    return getJson(proxyUrl, "", params, "keyword archive", { "x-relay-key": proxyKey });
+  }
+  return getJson("https://api.pullpush.io/reddit/search", `${endpoint.replace(/^\/+|\/+$/g, "")}/`, params, "keyword archive");
+};
 
 const REMOVED = new Set(["[deleted]", "[removed]"]);
 

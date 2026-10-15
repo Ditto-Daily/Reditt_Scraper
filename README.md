@@ -70,3 +70,7 @@ Deploy: import the repo into Vercel (framework: Next.js) and add these environme
 | `GEMINI_MODELS` | Optional. Comma-separated model priority list, falls back on quota/overload |
 
 Extraction routes allow up to 300 seconds (`maxDuration`), which needs a Vercel Pro plan.
+
+### Keyword search blocked on Vercel (HTTP 403 "Just a moment...")
+
+PullPush sits behind Cloudflare, which can challenge Vercel's server IPs. Deploy `cloudflare-worker/pullpush-relay.js` as a Cloudflare Worker, set a `RELAY_KEY` secret on it, then add `PULLPUSH_PROXY_URL` (the Worker URL) and `PULLPUSH_PROXY_KEY` (the same secret) in Vercel and redeploy.
