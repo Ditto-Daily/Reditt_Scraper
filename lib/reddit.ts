@@ -102,7 +102,7 @@ async function getJson(
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
     throw new RedditDataError(
-      `The ${label} returned HTTP ${response.status}. Try again later.${response.status === 403 ? ` The archive may be blocking this server. ${detail}` : ""}`,
+      `The ${label} returned HTTP ${response.status}. Try again later.${response.status === 403 || response.status === 401 ? ` The archive or relay rejected this server. ${detail}` : ""}`,
     );
   }
   let result: unknown;
@@ -128,9 +128,11 @@ const pullPush = async (endpoint: string, params: Record<string, string | number
   if (proxyUrl) {
     return getJson(proxyUrl, "", params, "keyword archive", { "x-relay-key": process.env.PULLPUSH_PROXY_KEY ?? "" });
   }
-  if (process.env.VERCEL_URL) {
+  // The production domain is not behind Vercel Deployment Protection; per-deployment URLs usually are.
+  const vercelHost = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+  if (vercelHost) {
     const key = await computeSessionToken(getPassword());
-    return getJson(`https://${process.env.VERCEL_URL}`, "api/pullpush", params, "keyword archive", { "x-relay-key": key });
+    return getJson(`https://${vercelHost}`, "api/pullpush", params, "keyword archive", { "x-relay-key": key });
   }
   return getJson("https://api.pullpush.io/reddit/search", `${endpoint.replace(/^\/+|\/+$/g, "")}/`, params, "keyword archive");
 };
