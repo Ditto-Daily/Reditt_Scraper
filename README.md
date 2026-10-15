@@ -8,7 +8,7 @@ Google Gemini.
 
 - **Community Search** retrieves archived posts from one specific subreddit.
 - **Keyword Search** searches archived posts across communities using one keyword
-  or up to five comma-separated keywords with AND/OR matching.
+  or up to five comma-separated keywords with AND/OR matching. 
 
 ## Run locally
 
