@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { computeSessionToken, getPassword, safeEqual, SESSION_COOKIE } from "@/lib/auth";
 
-const PUBLIC_PATHS = new Set(["/login", "/api/login"]);
+// /api/pullpush is the Python relay, which checks its own x-relay-key header.
+const PUBLIC_PATHS = new Set(["/login", "/api/login", "/api/pullpush"]);
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
