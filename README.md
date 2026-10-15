@@ -47,3 +47,26 @@ each model in order and fall back to the next when one hits its quota.
 
 Never commit API keys. Local Streamlit secrets, `.env` files, and common generated
 files are excluded through `.gitignore`.
+
+
+## Next.js version (Vercel)
+
+The Next.js rewrite lives at the repo root (`app/`, `components/`, `lib/`) with the same features as the Streamlit app: community search, keyword search, filters, CSV export, keyword analytics, AI strategist and research chat with Gemini model fallback.
+
+Run locally:
+
+```bash
+npm install
+cp .env.example .env.local   # fill in the values
+npm run dev
+```
+
+Deploy: import the repo into Vercel (framework: Next.js) and add these environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `APP_PASSWORD` | Team password for the login screen |
+| `GEMINI_API_KEY` | Gemini key (server-side only) |
+| `GEMINI_MODELS` | Optional. Comma-separated model priority list, falls back on quota/overload |
+
+Extraction routes allow up to 300 seconds (`maxDuration`), which needs a Vercel Pro plan.

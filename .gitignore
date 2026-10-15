@@ -5,3 +5,9 @@ __pycache__/
 .env
 .venv/
 .streamlit/secrets.toml
+
+node_modules/
+.next/
+.env*.local
+next-env.d.ts
+*.tsbuildinfo
